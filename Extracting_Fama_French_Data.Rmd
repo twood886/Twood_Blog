@@ -4,7 +4,7 @@ description: |
   Using R to extract all the dataset from Kennith French's Darthmouth website.
 author:
   - name: Taylor Wood
-    url: https://example.com/norajones
+    url: https://twood.blog/famafrenchextract
 date: "`r Sys.Date()`"
 output: distill::distill_article
 ---
