@@ -1,0 +1,166 @@
+---
+title: "Extracting Fama French Data"
+description: |
+  Using R to extract all the dataset from Kennith French's Darthmouth website.
+author:
+  - name: Taylor Wood
+    url: https://example.com/norajones
+date: "`r Sys.Date()`"
+output: distill::distill_article
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+The following code is used to download all of the data on Kenneth R. French's Website.  
+
+First we need to include the necessary packages.  
+
+```{r dependencies, echo=TRUE}
+library(tidyverse)
+library(rvest)
+library(readr)
+library(lubridate)
+library(janitor)
+```
+
+
+
+Next we need to download all the links to the CSV files in 
+on Kenneth R. French's website.  
+
+```{r downloadLinks, echo=TRUE}
+# Kenneth French's Data Library Webpage
+url <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html"
+
+# Read HTML and find <b> nodes
+# Look for nodes with "CSV.zip" 
+csvLinks <- url %>%
+  read_html() %>%
+  html_nodes("b") %>%
+  as.character() %>%
+  as_tibble(column_name = "value") %>%
+  mutate(`lead2` = lead(`value`, 2)) %>%
+  filter(str_detect(`lead2`, "CSV.zip")) %>%
+  transmute(
+    `Name` = str_extract(`value`, "(?<=\\<b\\>).*(?=\\</b\\>)"),
+    `Link` = str_extract(`lead2`, "ftp.+zip"))
+```
+
+
+
+Once we have Data Frame of the all the CSV file names we need to download the
+zipped files, unzip them, and store them in a list.  
+
+```{r donwloadRawData, echo=TRUE}
+FFExtract <- function(df){
+  
+  # Find Cells with Name/Description and Extract
+  nameLoc <- str_which(df$V1, "[A-z]+")
+  if(length(nameLoc) == 0){
+    name <- NA
+  }else{
+    name <- str_c(str_trim(df[nameLoc,1][[1]]), collapse = " ")
+  }
+  
+  # Find Rows with Data and Extract
+  dataLoc <- str_which(df$V1, "^\\s*[0-9]{4,}")
+  data <- df[dataLoc,] %>%
+    `colnames<-`(df[min(dataLoc)-1,]) %>%
+    clean_names() %>%
+    rename(`Date` = 1) %>%
+    mutate_all(as.numeric)
+  
+  return(list("Description" = name, "Data" = data))
+}
+
+# Function to Download CSV Data from Child
+dataDownload <- function(name, child){
+  
+  # Create working URL of child 
+  fileName <- child %>%
+    str_extract("(?<=/).+(?=\\_CSV\\.zip)") %>%
+    str_c(".CSV")
+  
+  # Create tempfile for download
+  temp <- tempfile()
+  
+  # Download zip file from Ken French website
+  download.file(
+    url = str_c(
+      "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/",
+      child),
+    destfile = temp)
+  
+  # Unzip data file
+  unzip(temp)
+  
+  # Read in CSV file
+  rawData <- read.csv(
+    fileName,
+    header = FALSE,
+    sep = ",",
+    col.names = paste0("V",seq_len(200)),
+    fill = T,
+    blank.lines.skip = F)
+  
+    # Remove Leading rows
+  Desc <- rawData[1:(min(str_which(rawData$V1, "^[0-9]{4,}"))-2),1]
+  rawData <-rawData[(min(str_which(rawData$V1, "^[0-9]{4,}"))-2):nrow(rawData),]
+  
+  # Split data into different data chunks
+  Data <- rawData %>% 
+    filter(!str_detect(.[[1]], "Copyright")) %>%
+    select_if(~!all(is.na(.))) %>%
+    select_if(~!all(. == "")) %>%
+    mutate(
+      `istext` = ifelse(str_detect(.[[1]], "[a-z]+"),1,0),
+      `change` = ifelse(`istext` == 1 & lag(`istext`,1, default = 0) == 0 , 1, 0),
+      `group` = cumsum(`change`)) %>%
+    select(-c(`istext`, `change`)) %>%
+    group_split(`group`, .keep = F)
+
+  extractedList <- lapply(Data, FFExtract)
+
+  return(list("Description" = Desc,
+              "Data" = extractedList))
+}
+```
+
+Now we can download all of the data.  
+
+```{r, echo=TRUE}
+FamaFrenchData <- mapply(dataDownload, 
+                         name = csvLinks$Name,
+                         child = csvLinks$Link,
+                         SIMPLIFY = FALSE)
+```
+
+From there we can use the data for further analysis.  
+
+```{r, echo = TRUE}
+FF3 <- FamaFrenchData$`Fama/French 3 Factors [Daily]`$Data[[1]]$Data %>%
+  transmute(
+    `Date` = as.Date(as.character(`Date`), "%Y%m%d"),
+    `Rm_Rf_Cum` = cumprod(1 + `mkt_rf`/100) - 1,
+    `SMB_Cum` = cumprod(1 + `smb`/100) - 1,
+    `HML_Cum` = cumprod(1 + `hml`/100) - 1) %>%
+  pivot_longer(
+    cols = c(`Rm_Rf_Cum`, `SMB_Cum`, `HML_Cum`),
+    names_to = "factor_name",
+    values_to = "factor_value")
+
+ggplot(FF3) +
+  aes(x = Date, y = factor_value, colour = factor_name) +
+  scale_y_continuous(labels = scales::percent) +
+  geom_line(size = 0.5) +
+  scale_color_viridis_d(option = "viridis", direction = 1) +
+  labs(
+    x = "Date",
+    y = "Cumualtive Return",
+    title = "Fama French 3 Factor Model",
+    subtitle = "Cumulative Return",
+    color = "Factor Name"
+  ) +
+  theme_minimal()
+```
